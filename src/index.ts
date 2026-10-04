@@ -3,70 +3,61 @@ import { Keypair, Connection } from '@solana/web3.js';
 import bs58 from 'bs58';
 import Anthropic from '@anthropic-ai/sdk';
 import { solana } from '@agenti/sdk';
+import { readConfig, assertConfig } from './config.js';
 import { sendTelegramAlert } from './alerts.js';
 import { fetchTrendingTokens } from './market.js';
+import { scoreToken, shouldBuy } from './strategy.js';
+import { assessRisk } from './risk.js';
 
-const mode = process.argv.includes('--mode')
-  ? process.argv[process.argv.indexOf('--mode') + 1]
-  : process.env.MODE || 'dry-run';
+const cfg = readConfig();
+assertConfig(cfg);
 
-const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true';
-const autoExecute = process.env.AUTO_EXECUTE === 'true' && !dryRun;
-const maxSolPerTrade = Number(process.env.MAX_SOL_PER_TRADE ?? '0.1');
-const pollIntervalMs = Number(process.env.POLL_INTERVAL_MS ?? '300000');
-
-if (!process.env.ANTHROPIC_API_KEY) {
-  throw new Error('ANTHROPIC_API_KEY is required');
-}
-
-if (!process.env.SOLANA_PRIVATE_KEY) {
-  throw new Error('SOLANA_PRIVATE_KEY is required');
-}
-
-const connection = new Connection(process.env.SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com');
-const keypair = Keypair.fromSecretKey(bs58.decode(process.env.SOLANA_PRIVATE_KEY));
+const connection = new Connection(cfg.solanaRpcUrl);
+const keypair = Keypair.fromSecretKey(bs58.decode(cfg.solanaPrivateKey));
 const trader = solana({ keypair, connection });
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: cfg.anthropicApiKey });
 
 function getModeLabel() {
-  if (dryRun) return 'DRY_RUN';
-  if (autoExecute) return 'AUTO';
-  return 'MANUAL';
+  return cfg.dryRun ? 'DRY_RUN' : cfg.autoExecute ? 'AUTO' : 'MANUAL';
 }
 
-function parseDecision(raw: string): 'BUY' | 'SKIP' {
-  const cleaned = raw.trim().toUpperCase();
-  if (cleaned.startsWith('BUY')) return 'BUY';
-  return 'SKIP';
+function formatMoney(value: number) {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
 }
 
-async function askClaudeDecision(token: { name: string; mint: string; marketCap: number; volume: number; holders: number }): Promise<'BUY' | 'SKIP'> {
+async function askClaudeDecision(token: {
+  name: string;
+  mint: string;
+  marketCap: number;
+  volume: number;
+  holders: number;
+  ageHours?: number;
+}) {
   const prompt = `
-You are a careful Solana meme-coin trading assistant.
-Your job is to decide whether a token is worth a small, controlled buy.
+You are a conservative crypto token scouting assistant.
 
-Token summary:
-- Name: ${token.name}
-- Mint: ${token.mint}
-- Market cap: $${token.marketCap.toLocaleString()}
-- 24h volume: $${token.volume.toLocaleString()}
-- Holders: ${token.holders.toLocaleString()}
+Only return one exact line:
+BUY: <reason>
+SKIP: <reason>
+
+Token:
+- name: ${token.name}
+- mint: ${token.mint}
+- market cap: $${formatMoney(token.marketCap)}
+- 24h volume: $${formatMoney(token.volume)}
+- holders: ${formatMoney(token.holders)}
+- ageHours: ${token.ageHours ?? 'unknown'}
 
 Rules:
-- Prefer tokens with real community traction and healthy liquidity.
-- Reject obvious pump-and-dumps, fake activity, or suspicious token metadata.
-- If the setup looks weak or too risky, answer SKIP.
-- If there is a decent signal but still moderate risk, answer SKIP.
-- Only answer BUY if the setup is promising and the risk is controlled.
-
-Return ONLY one of these two exact strings:
-BUY: <short reason>
-SKIP: <short reason>
+- Prioritize signals with healthy volume and real holders.
+- Reject suspicious, microcap, or fake-liquidity tokens.
+- Keep the decision conservative.
+- A weak or unclear setup should be SKIP.
 `;
 
   const response = await anthropic.messages.create({
     model: 'claude-3-5-sonnet-20241022',
-    max_tokens: 120,
+    max_tokens: 140,
     messages: [{ role: 'user', content: prompt }],
   });
 
@@ -76,60 +67,81 @@ SKIP: <short reason>
     .join(' ')
     .trim();
 
-  const decision = parseDecision(text);
-  return decision;
+  const upper = text.toUpperCase();
+  if (upper.startsWith('BUY')) return 'BUY';
+  return 'SKIP';
 }
 
-async function processToken(token: { name: string; mint: string; marketCap: number; volume: number; holders: number }) {
+async function processToken(token: {
+  name: string;
+  mint: string;
+  marketCap: number;
+  volume: number;
+  holders: number;
+  ageHours?: number;
+}) {
+  const signalScore = scoreToken(token);
+  const risk = assessRisk(token);
+
+  if (signalScore < 70 || !risk.allowed) {
+    console.log(`SKIP ${token.name} | score=${signalScore} | risk=${risk.score} | reason=${risk.reason}`);
+    return;
+  }
+
   const decision = await askClaudeDecision(token);
+  if (decision !== 'BUY') {
+    console.log(`Claude skipped ${token.name} (${token.mint}) | signal=${signalScore}`);
+    return;
+  }
 
-  if (decision === 'BUY') {
-    const alertText = `BUY signal: ${token.name} (${token.mint}) | CAP $${token.marketCap.toLocaleString()} | VOL $${token.volume.toLocaleString()} | MODE ${getModeLabel()}`;
-    await sendTelegramAlert(alertText);
+  const alertText = `BUY signal: ${token.name} (${token.mint}) | score=${signalScore} | risk=${risk.score} | vol=$${formatMoney(token.volume)} | cap=$${formatMoney(token.marketCap)} | mode=${getModeLabel()}`;
+  await sendTelegramAlert(alertText);
 
-    if (autoExecute) {
-      try {
-        const amount = Math.min(maxSolPerTrade, 0.25);
-        const result = await trader.buy({
-          mint: token.mint,
-          solAmount: amount,
-          slippage: 10,
-        });
+  if (!cfg.autoExecute) {
+    console.log(`DRY_RUN approved: ${alertText}`);
+    return;
+  }
 
-        const successText = `Executed BUY for ${token.name} | SOL ${amount} | tx ${result.explorerUrl ?? 'submitted'}`;
-        await sendTelegramAlert(successText);
-        console.log(successText);
-      } catch (error) {
-        const errText = `BUY failed for ${token.name}: ${(error as Error).message}`;
-        await sendTelegramAlert(errText);
-        console.error(errText);
-      }
-    } else {
-      console.log(`DRY_RUN active: ${alertText}`);
-    }
-  } else {
-    console.log(`SKIP ${token.name} (${token.mint})`);
+  try {
+    const size = Math.min(cfg.maxSolPerTrade, 0.25);
+    const result = await trader.buy({
+      mint: token.mint,
+      solAmount: size,
+      slippage: 10,
+    });
+
+    const successText = `Bought ${token.name} | size=${size} SOL | tx=${result.explorerUrl ?? 'submitted'}`;
+    await sendTelegramAlert(successText);
+    console.log(successText);
+  } catch (error) {
+    const err = `Trade failed for ${token.name}: ${(error as Error).message}`;
+    await sendTelegramAlert(err);
+    console.error(err);
   }
 }
 
 async function main() {
-  console.log(`Starting Solana trading agent in ${getModeLabel()} mode`);
+  console.log(`Starting Solana trading agent | mode=${getModeLabel()} | dryRun=${cfg.dryRun} | autoExecute=${cfg.autoExecute}`);
 
-  const trending = await fetchTrendingTokens();
-  console.log(`Fetched ${trending.length} token candidates`);
+  const tokens = await fetchTrendingTokens();
+  console.log(`Fetched ${tokens.length} candidates`);
 
-  for (const token of trending) {
+  for (const token of tokens) {
     try {
+      const shouldTake = shouldBuy(token) && assessRisk(token).allowed;
+      if (!shouldTake) {
+        console.log(`Pre-filter skipped ${token.name} | marketCap=${token.marketCap} | volume=${token.volume}`);
+        continue;
+      }
+
       await processToken(token);
     } catch (error) {
-      console.error(`Token processing failed for ${token.mint}: ${(error as Error).message}`);
+      console.error(`Token processing failed for ${token.name}: ${(error as Error).message}`);
     }
   }
 
-  console.log(`Cycle complete. Next poll in ${pollIntervalMs} ms`);
-  if (process.env.NODE_ENV !== 'test') {
-    setTimeout(main, pollIntervalMs);
-  }
+  console.log(`Cycle complete -> sleeping ${cfg.pollIntervalMs} ms`);
+  setTimeout(main, cfg.pollIntervalMs);
 }
 
 await main();

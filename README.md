@@ -1,30 +1,46 @@
 # Solana Trading Agent
 
-This project is a lightweight autonomous trading agent for pump.fun-style token opportunities on Solana.
+A scalable autonomous trading foundation for Solana token discovery, decisioning, and execution.
 
-It will:
-- discover trending tokens,
-- ask Claude for a buy/skip decision,
-- execute a controlled trade via `@agenti/sdk`,
-- send Telegram alerts,
-- run in safe `DRY_RUN` mode by default.
+## What this version includes
+
+- Solana wallet integration through `@agenti/sdk`
+- Trend market scanning for Pump.fun-like opportunities
+- Risk assessment before any buy
+- Claude-driven buy/skip decisions
+- Telegram alerts
+- Dry-run safety by default
+- Production-friendly config separation
+- Strategy scoring architecture ready for expansion
+
+## Philosophy
+
+This is not a gambling script. It is a disciplined starting point for a production system that can later evolve toward:
+
+- multi-strategy execution,
+- backtesting,
+- portfolio risk systems,
+- rebalancing,
+- on-chain position tracking,
+- agent-to-agent settlement,
+- and a full autonomous economic layer.
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and fill in your keys.
+1. Copy `.env.example` to `.env` and fill values.
 2. Install dependencies:
 
 ```bash
 npm install
 ```
 
-3. Run in dry-run mode first:
+3. Run in dry-run mode:
 
 ```bash
 npm run dry-run
 ```
 
-4. When you are comfortable, switch to mainnet execution:
+4. When ready for execution:
 
 ```bash
 AUTO_EXECUTE=true
@@ -32,25 +48,48 @@ DRY_RUN=false
 npm run mainnet
 ```
 
-## Safety
+## System architecture
 
-- Default behavior is `DRY_RUN=true`.
-- `MAX_SOL_PER_TRADE` limits trade size.
-- The bot intentionally filters out suspicious tokens and uses strict model prompts.
-- This is experimental software for learning and controlled testing only.
+The current design is intentionally modular so it can grow into a full trading system:
 
-## Required env variables
+- `src/config.ts` — environment-based configuration
+- `src/market.ts` — market discovery and token collection
+- `src/strategy.ts` — scoring and decision thresholds
+- `src/risk.ts` — risk gatekeeping
+- `src/alerts.ts` — Telegram notifications
+- `src/index.ts` — orchestration loop
 
-- `ANTHROPIC_API_KEY`
-- `SOLANA_PRIVATE_KEY` in base58 format
-- `SOLANA_RPC_URL`
-- `AUTO_EXECUTE` (`true|false`)
-- `DRY_RUN` (`true|false`)
-- `MAX_SOL_PER_TRADE`
-- `POLL_INTERVAL_MS`
-- `TELEGRAM_BOT_TOKEN` (optional)
-- `TELEGRAM_CHAT_ID` (optional)
+## Safety framework
 
-## Notes
+The system is built around a strict safety model:
 
-This is a starting point for a real autonomous trading agent. It is intentionally conservative and designed to be upgraded toward more advanced strategies.
+- no trade can happen without a risk gate,
+- no trade can happen without a strategy score threshold,
+- `DRY_RUN` is the default path,
+- `AUTO_EXECUTE` is explicitly opt-in,
+- max trade size is limited by environment configuration,
+- alerts provide operational transparency.
+
+## Next-stage roadmap
+
+This foundation is already designed for the next layers of the bigger vision:
+
+1. Paper trading / backtest mode
+2. Multi-strategy allocation system
+3. Portfolio-level risk tracking
+4. Lifecycle management of positions
+5. Agent marketplace and autonomous task payments
+6. Production-grade monitoring and reliability controls
+
+## Long-term plan
+
+The real win is not just another trading bot. The bigger goal is to build an autonomous economic layer where agents can:
+
+- discover opportunities,
+- evaluate risk,
+- execute trades,
+- pay for resources,
+- allocate capital across strategies,
+- and self-expand through earned capital and better execution.
+
+This repo is the first controlled foundation for that larger trajectory.
