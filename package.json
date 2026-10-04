@@ -1,0 +1,25 @@
+{
+  "name": "solana-trading-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "testnet": "tsx src/index.ts --mode testnet",
+    "mainnet": "tsx src/index.ts --mode mainnet",
+    "dry-run": "tsx src/index.ts --dry-run",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agenti/sdk": "^0.1.0",
+    "@anthropic-ai/sdk": "^0.25.0",
+    "@solana/web3.js": "^1.98.2",
+    "bs58": "^4.1.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
