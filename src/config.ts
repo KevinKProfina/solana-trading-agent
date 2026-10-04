@@ -1,51 +1,162 @@
-export type AppConfig = {
-  anthropicApiKey: string;
-  solanaPrivateKey: string;
-  solanaRpcUrl: string;
-  dryRun: boolean;
-  autoExecute: boolean;
-  maxSolPerTrade: number;
-  pollIntervalMs: number;
-  minMarketCap: number;
-  telegramBotToken?: string;
-  telegramChatId?: string;
-  mode: 'dry-run' | 'mainnet' | 'testnet';
+import type { RunMode } from './mm-contract.js';
+
+export const STRATEGY_NAME = 'solana-trader';
+export const LIVE_CONFIRM_PHRASE = 'I_UNDERSTAND_REAL_MONEY_RISK';
+
+export type StrategyRules = {
+  minLiquidityUsd: number;
+  minVolume24hUsd: number;
+  minMarketCapUsd: number;
+  maxMarketCapUsd: number;
+  minAgeHours: number;
+  minTxns24h: number;
+  minBuySellRatio: number;
+  minLiquidityToMcap: number;
+  minScore: number;
 };
 
-export function readConfig(): AppConfig {
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? '';
-  const solanaPrivateKey = process.env.SOLANA_PRIVATE_KEY ?? '';
-  const solanaRpcUrl = process.env.SOLANA_RPC_URL ?? 'https://api.mainnet-beta.solana.com';
-  const dryRun = process.env.DRY_RUN === 'true' || process.argv.includes('--dry-run');
-  const autoExecute = process.env.AUTO_EXECUTE === 'true' && !dryRun;
-  const modeFlag = process.argv.includes('--mode') ? process.argv[process.argv.indexOf('--mode') + 1] : process.env.MODE;
-  const mode = (modeFlag === 'mainnet' || modeFlag === 'testnet' || modeFlag === 'dry-run') ? modeFlag : dryRun ? 'dry-run' : 'mainnet';
+export type ExitRules = {
+  takeProfitPct: number;
+  stopLossPct: number;
+  trailingStopPct: number;
+  /** Trailing stop only arms once price has been at least this far above entry. */
+  trailingActivationPct: number;
+  maxHoldHours: number;
+};
 
-  return {
-    anthropicApiKey,
-    solanaPrivateKey,
-    solanaRpcUrl,
-    dryRun,
-    autoExecute,
-    maxSolPerTrade: Number(process.env.MAX_SOL_PER_TRADE ?? '0.1'),
-    pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? '300000'),
-    minMarketCap: Number(process.env.MIN_MARKET_CAP ?? '100000'),
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || undefined,
-    telegramChatId: process.env.TELEGRAM_CHAT_ID || undefined,
-    mode,
-  };
+export type SizingRules = {
+  startingCapitalUsd: number;
+  maxUsdPerTrade: number;
+  maxPositionPct: number;
+  maxConcurrentPositions: number;
+  minTradeUsd: number;
+};
+
+export type AppConfig = {
+  mode: RunMode;
+  /** Human-readable notes about how the mode was resolved (e.g. live requested but not confirmed). */
+  modeNotes: string[];
+  pollIntervalMs: number;
+  maxCandidates: number;
+  strategy: StrategyRules;
+  exits: ExitRules;
+  sizing: SizingRules;
+  paperSlippageBps: number;
+  paperFeeBps: number;
+  liveSlippageBps: number;
+  killClosesPositions: boolean;
+  useClaudeGate: boolean;
+  anthropicApiKey?: string;
+  solanaPrivateKey?: string;
+  solanaRpcUrl: string;
+  minSolBalance: number;
+  telegramBotToken?: string;
+  telegramChatId?: string;
+};
+
+type Env = Record<string, string | undefined>;
+
+function num(env: Env, key: string, fallback: number): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${key} must be a number (got "${raw}")`);
+  return value;
 }
 
-export function assertConfig(cfg: AppConfig) {
-  if (!cfg.anthropicApiKey) {
-    throw new Error('ANTHROPIC_API_KEY is required');
-  }
+function flag(env: Env, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === 'true' || raw === '1' || raw === 'yes';
+}
 
-  if (!cfg.solanaPrivateKey) {
-    throw new Error('SOLANA_PRIVATE_KEY is required');
-  }
+function argValue(argv: string[], name: string): string | undefined {
+  const idx = argv.indexOf(name);
+  return idx >= 0 ? argv[idx + 1] : undefined;
+}
 
-  if (!Number.isFinite(cfg.maxSolPerTrade) || cfg.maxSolPerTrade <= 0) {
-    throw new Error('MAX_SOL_PER_TRADE must be positive');
+/**
+ * Mode resolution (safe by default):
+ * - live only when MODE=live AND LIVE_TRADING_CONFIRM matches the phrase exactly
+ * - dry-run when requested via MODE/--mode or DRY_RUN=true
+ * - everything else (including unconfirmed live and unknown values) → paper
+ */
+export function resolveMode(env: Env, argv: string[]): { mode: RunMode; notes: string[] } {
+  const requested = (argValue(argv, '--mode') ?? env.MODE ?? '').trim().toLowerCase();
+  const notes: string[] = [];
+  if (requested === 'live') {
+    if (env.LIVE_TRADING_CONFIRM === LIVE_CONFIRM_PHRASE) return { mode: 'live', notes };
+    notes.push('MODE=live requested but LIVE_TRADING_CONFIRM is not set to the confirmation phrase; running in paper mode');
+    return { mode: 'paper', notes };
+  }
+  if (requested === 'dry-run' || (requested === '' && flag(env, 'DRY_RUN', false))) return { mode: 'dry-run', notes };
+  if (requested !== '' && requested !== 'paper') notes.push(`Unknown MODE "${requested}"; running in paper mode`);
+  return { mode: 'paper', notes };
+}
+
+export function readConfig(env: Env = process.env, argv: string[] = process.argv): AppConfig {
+  const { mode, notes } = resolveMode(env, argv);
+  const cfg: AppConfig = {
+    mode,
+    modeNotes: notes,
+    pollIntervalMs: num(env, 'POLL_INTERVAL_MS', 300_000),
+    maxCandidates: num(env, 'MAX_CANDIDATES', 30),
+    strategy: {
+      minLiquidityUsd: num(env, 'MIN_LIQUIDITY_USD', 50_000),
+      minVolume24hUsd: num(env, 'MIN_VOLUME_24H_USD', 100_000),
+      minMarketCapUsd: num(env, 'MIN_MARKET_CAP_USD', 250_000),
+      maxMarketCapUsd: num(env, 'MAX_MARKET_CAP_USD', 500_000_000),
+      minAgeHours: num(env, 'MIN_AGE_HOURS', 24),
+      minTxns24h: num(env, 'MIN_TXNS_24H', 200),
+      minBuySellRatio: num(env, 'MIN_BUY_SELL_RATIO', 0.9),
+      minLiquidityToMcap: num(env, 'MIN_LIQUIDITY_TO_MCAP', 0.03),
+      minScore: num(env, 'MIN_SCORE', 50),
+    },
+    exits: {
+      takeProfitPct: num(env, 'TAKE_PROFIT_PCT', 25),
+      stopLossPct: num(env, 'STOP_LOSS_PCT', 10),
+      trailingStopPct: num(env, 'TRAILING_STOP_PCT', 8),
+      trailingActivationPct: num(env, 'TRAILING_ACTIVATION_PCT', 5),
+      maxHoldHours: num(env, 'MAX_HOLD_HOURS', 48),
+    },
+    sizing: {
+      startingCapitalUsd: num(env, 'STARTING_CAPITAL_USD', 1_000),
+      maxUsdPerTrade: num(env, 'MAX_USD_PER_TRADE', 50),
+      maxPositionPct: num(env, 'MAX_POSITION_PCT', 0.1),
+      maxConcurrentPositions: num(env, 'MAX_CONCURRENT_POSITIONS', 5),
+      minTradeUsd: num(env, 'MIN_TRADE_USD', 5),
+    },
+    paperSlippageBps: num(env, 'PAPER_SLIPPAGE_BPS', 100),
+    paperFeeBps: num(env, 'PAPER_FEE_BPS', 30),
+    liveSlippageBps: num(env, 'LIVE_SLIPPAGE_BPS', 100),
+    killClosesPositions: flag(env, 'KILL_CLOSES_POSITIONS', false),
+    useClaudeGate: flag(env, 'USE_CLAUDE_GATE', true),
+    anthropicApiKey: env.ANTHROPIC_API_KEY || undefined,
+    solanaPrivateKey: env.SOLANA_PRIVATE_KEY || undefined,
+    solanaRpcUrl: env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
+    minSolBalance: num(env, 'MIN_SOL_BALANCE', 0.05),
+    telegramBotToken: env.TELEGRAM_BOT_TOKEN || undefined,
+    telegramChatId: env.TELEGRAM_CHAT_ID || undefined,
+  };
+  assertConfig(cfg);
+  return cfg;
+}
+
+export function assertConfig(cfg: AppConfig): void {
+  const positive: Array<[string, number]> = [
+    ['STARTING_CAPITAL_USD', cfg.sizing.startingCapitalUsd],
+    ['MAX_USD_PER_TRADE', cfg.sizing.maxUsdPerTrade],
+    ['MAX_POSITION_PCT', cfg.sizing.maxPositionPct],
+    ['POLL_INTERVAL_MS', cfg.pollIntervalMs],
+    ['STOP_LOSS_PCT', cfg.exits.stopLossPct],
+    ['TAKE_PROFIT_PCT', cfg.exits.takeProfitPct],
+  ];
+  for (const [key, value] of positive) {
+    if (!(value > 0)) throw new Error(`${key} must be positive`);
+  }
+  if (cfg.sizing.maxPositionPct > 1) throw new Error('MAX_POSITION_PCT is a fraction (0..1)');
+  if (cfg.exits.stopLossPct >= 100) throw new Error('STOP_LOSS_PCT must be < 100');
+  if (cfg.mode === 'live' && !cfg.solanaPrivateKey) {
+    throw new Error('Live mode is confirmed but SOLANA_PRIVATE_KEY is not set');
   }
 }

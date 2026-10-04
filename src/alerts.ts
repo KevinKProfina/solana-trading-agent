@@ -1,27 +1,22 @@
-async function sendTelegramAlert(message: string) {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+/** Best-effort Telegram alert. Without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID it only logs. Never throws. */
+export async function sendTelegramAlert(message: string, env: Record<string, string | undefined> = process.env): Promise<void> {
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const chatId = env.TELEGRAM_CHAT_ID;
 
   if (!botToken || !chatId) {
-    console.log(`[TELEGRAM DISABLED] ${message}`);
+    console.log(`[alert] ${message}`);
     return;
   }
 
-  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-
   try {
-    await fetch(url, {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'HTML',
-      }),
+      body: JSON.stringify({ chat_id: chatId, text: message, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(10_000),
     });
+    if (!res.ok) console.error(`[alert] Telegram responded ${res.status}`);
   } catch (error) {
-    console.error(`Telegram alert failed: ${(error as Error).message}`);
+    console.error(`[alert] Telegram alert failed: ${(error as Error).message}`);
   }
 }
-
-export { sendTelegramAlert };

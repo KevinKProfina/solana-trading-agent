@@ -1,28 +1,31 @@
 {
   "name": "solana-trading-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
+  "description": "solana-trader strategy for the Money Machine system (paper trading by default)",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "dry-run": "tsx src/index.ts --mode dry-run",
-    "paper": "tsx src/index.ts --mode paper",
-    "mainnet": "tsx src/index.ts --mode mainnet",
-    "testnet": "tsx src/index.ts --mode testnet",
+    "once": "tsx src/index.ts --once",
+    "dry-run": "tsx src/index.ts --once --mode dry-run",
+    "replay": "tsx src/replay.ts",
     "wallet-check": "tsx src/wallet-check.ts",
-    "health-check": "tsx src/health-check.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@agenti/sdk": "^0.1.0",
-    "@anthropic-ai/sdk": "^0.25.0",
-    "@solana/web3.js": "^1.98.2",
-    "bs58": "^4.1.0",
-    "dotenv": "^16.4.5"
+    "@anthropic-ai/sdk": "^0.131.0",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.6.1"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
   }
 }

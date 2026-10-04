@@ -1,48 +1,131 @@
-export type TrendingToken = {
-  name: string;
+import { fetchJson, type FetchLike } from './http.js';
+
+export type Token = {
   mint: string;
-  marketCap: number;
-  volume: number;
-  holders: number;
-  ageHours?: number;
+  symbol: string;
+  name: string;
+  pairAddress: string;
+  dexId: string;
+  url?: string;
+  priceUsd: number;
+  liquidityUsd: number;
+  volume24hUsd: number;
+  marketCapUsd: number;
+  /** Hours since the pair was created; NaN when unknown. */
+  ageHours: number;
+  buys24h: number;
+  sells24h: number;
 };
 
-function normalizeNumber(value: unknown, fallback = 0): number {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number(value.replace(/[^0-9.-]/g, ''));
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-  return fallback;
+export interface MarketSource {
+  /** Discover candidate Solana token mints (newest profiles first). */
+  discover(limit: number): Promise<Token[]>;
+  /** Current market data for the given mints; mints without data are absent from the map. */
+  getTokens(mints: string[]): Promise<Map<string, Token>>;
 }
 
-async function fetchTrendingTokens(): Promise<TrendingToken[]> {
-  try {
-    const response = await fetch('https://frontend-api-v3.pump.fun/coins-v2');
-    if (!response.ok) {
-      throw new Error(`Pool fetch failed: ${response.statusText}`);
+const DEXSCREENER = 'https://api.dexscreener.com';
+/** DexScreener accepts up to 30 addresses per tokens request. */
+const BATCH = 30;
+
+type DexProfile = { chainId?: string; tokenAddress?: string };
+type DexPair = {
+  chainId?: string;
+  dexId?: string;
+  url?: string;
+  pairAddress?: string;
+  baseToken?: { address?: string; name?: string; symbol?: string };
+  priceUsd?: string | number;
+  liquidity?: { usd?: number };
+  volume?: { h24?: number };
+  txns?: { h24?: { buys?: number; sells?: number } };
+  marketCap?: number;
+  fdv?: number;
+  pairCreatedAt?: number;
+};
+
+function n(value: unknown): number {
+  const parsed = typeof value === 'string' ? Number(value) : value;
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Convert a DexScreener pair into a Token; returns undefined for unusable pairs. */
+export function normalizePair(pair: DexPair, now = Date.now()): Token | undefined {
+  const mint = pair.baseToken?.address;
+  const priceUsd = n(pair.priceUsd);
+  if (pair.chainId !== 'solana' || !mint || !pair.pairAddress || priceUsd <= 0) return undefined;
+  return {
+    mint,
+    symbol: pair.baseToken?.symbol ?? '?',
+    name: pair.baseToken?.name ?? pair.baseToken?.symbol ?? mint,
+    pairAddress: pair.pairAddress,
+    dexId: pair.dexId ?? 'unknown',
+    url: pair.url,
+    priceUsd,
+    liquidityUsd: n(pair.liquidity?.usd),
+    volume24hUsd: n(pair.volume?.h24),
+    marketCapUsd: n(pair.marketCap) || n(pair.fdv),
+    ageHours: pair.pairCreatedAt ? Math.max(0, (now - pair.pairCreatedAt) / 3_600_000) : Number.NaN,
+    buys24h: n(pair.txns?.h24?.buys),
+    sells24h: n(pair.txns?.h24?.sells),
+  };
+}
+
+/** Pick, per base-token mint, the pair with the deepest USD liquidity. */
+export function bestPairsByMint(pairs: DexPair[], now = Date.now()): Map<string, Token> {
+  const out = new Map<string, Token>();
+  for (const pair of pairs) {
+    const token = normalizePair(pair, now);
+    if (!token) continue;
+    const existing = out.get(token.mint);
+    if (!existing || token.liquidityUsd > existing.liquidityUsd) out.set(token.mint, token);
+  }
+  return out;
+}
+
+export class DexScreenerSource implements MarketSource {
+  constructor(
+    private readonly opts: { fetchImpl?: FetchLike; timeoutMs?: number; retries?: number; backoffMs?: number; now?: () => number } = {},
+  ) {}
+
+  private get http() {
+    return { fetchImpl: this.opts.fetchImpl, timeoutMs: this.opts.timeoutMs, retries: this.opts.retries, backoffMs: this.opts.backoffMs };
+  }
+
+  async discover(limit: number): Promise<Token[]> {
+    let profiles: DexProfile[] = [];
+    try {
+      const data = await fetchJson<unknown>(`${DEXSCREENER}/token-profiles/latest/v1`, this.http);
+      profiles = Array.isArray(data) ? (data as DexProfile[]) : [];
+    } catch (error) {
+      console.error(`[market] discovery failed: ${(error as Error).message}`);
+      return [];
     }
+    const mints = [
+      ...new Set(profiles.filter((p) => p.chainId === 'solana' && p.tokenAddress).map((p) => p.tokenAddress as string)),
+    ].slice(0, limit);
+    const tokens = await this.getTokens(mints);
+    return mints.map((m) => tokens.get(m)).filter((t): t is Token => t !== undefined);
+  }
 
-    const data = await response.json();
-    const tokens = Array.isArray(data) ? data : data?.coins ?? [];
-
-    return tokens
-      .filter((item: any) => item?.name && item?.mint)
-      .map((item: any) => ({
-        name: item.name,
-        mint: item.mint,
-        marketCap: normalizeNumber(item.market_cap ?? item.marketCap ?? 0),
-        volume: normalizeNumber(item.volume_24h ?? item.volume ?? 0),
-        holders: normalizeNumber(item.holders ?? 0),
-        ageHours: normalizeNumber(item.age_hours ?? item.ageHours ?? 0),
-      }))
-      .filter((item) => item.marketCap > 100_000)
-      .sort((a, b) => b.volume - a.volume)
-      .slice(0, 12);
-  } catch (error) {
-    console.error(`Market fetch failed: ${(error as Error).message}`);
-    return [];
+  async getTokens(mints: string[]): Promise<Map<string, Token>> {
+    const result = new Map<string, Token>();
+    const unique = [...new Set(mints)];
+    const now = this.opts.now?.() ?? Date.now();
+    for (let i = 0; i < unique.length; i += BATCH) {
+      const chunk = unique.slice(i, i + BATCH);
+      try {
+        const data = await fetchJson<{ pairs?: DexPair[] | null }>(
+          `${DEXSCREENER}/latest/dex/tokens/${chunk.join(',')}`,
+          this.http,
+        );
+        for (const [mint, token] of bestPairsByMint(data?.pairs ?? [], now)) {
+          if (chunk.includes(mint)) result.set(mint, token);
+        }
+      } catch (error) {
+        console.error(`[market] token lookup failed for ${chunk.length} mints: ${(error as Error).message}`);
+      }
+    }
+    return result;
   }
 }
-
-export { fetchTrendingTokens, type TrendingToken };
