@@ -8,6 +8,11 @@ import { sendTelegramAlert } from './alerts.js';
 import { fetchTrendingTokens } from './market.js';
 import { scoreToken, shouldBuy } from './strategy.js';
 import { assessRisk } from './risk.js';
+import { getWalletStatus, ensureWalletHealth } from './wallet.js';
+import { evaluateHealth } from './health.js';
+import { decideExit } from './exit.js';
+import { LedgerStore } from './ledger.js';
+import { PaperTradingStore } from './paper.js';
 
 const cfg = readConfig();
 assertConfig(cfg);
@@ -16,26 +21,20 @@ const connection = new Connection(cfg.solanaRpcUrl);
 const keypair = Keypair.fromSecretKey(bs58.decode(cfg.solanaPrivateKey));
 const trader = solana({ keypair, connection });
 const anthropic = new Anthropic({ apiKey: cfg.anthropicApiKey });
+const ledger = new LedgerStore(process.env.LEDGER_PATH ?? '.state/ledger.json');
+const paperLedger = new PaperTradingStore(process.env.PAPER_TRADES_PATH ?? '.state/paper-trades.json');
 
 function getModeLabel() {
-  return cfg.dryRun ? 'DRY_RUN' : cfg.autoExecute ? 'AUTO' : 'MANUAL';
+  return cfg.mode || (cfg.dryRun ? 'DRY_RUN' : cfg.autoExecute ? 'AUTO' : 'MANUAL');
 }
 
 function formatMoney(value: number) {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
 }
 
-async function askClaudeDecision(token: {
-  name: string;
-  mint: string;
-  marketCap: number;
-  volume: number;
-  holders: number;
-  ageHours?: number;
-}) {
+async function askClaudeDecision(token: { name: string; mint: string; marketCap: number; volume: number; holders: number; ageHours?: number }) {
   const prompt = `
 You are a conservative crypto token scouting assistant.
-
 Only return one exact line:
 BUY: <reason>
 SKIP: <reason>
@@ -49,10 +48,10 @@ Token:
 - ageHours: ${token.ageHours ?? 'unknown'}
 
 Rules:
-- Prioritize signals with healthy volume and real holders.
-- Reject suspicious, microcap, or fake-liquidity tokens.
+- Prefer real traction, healthy volume, real holders.
+- Reject weak or suspicious microcaps.
 - Keep the decision conservative.
-- A weak or unclear setup should be SKIP.
+- If unclear, choose SKIP.
 `;
 
   const response = await anthropic.messages.create({
@@ -67,42 +66,66 @@ Rules:
     .join(' ')
     .trim();
 
-  const upper = text.toUpperCase();
-  if (upper.startsWith('BUY')) return 'BUY';
-  return 'SKIP';
+  return text.toUpperCase().startsWith('BUY') ? 'BUY' : 'SKIP';
 }
 
-async function processToken(token: {
-  name: string;
-  mint: string;
-  marketCap: number;
-  volume: number;
-  holders: number;
-  ageHours?: number;
-}) {
+async function processToken(token: { name: string; mint: string; marketCap: number; volume: number; holders: number; ageHours?: number }) {
   const signalScore = scoreToken(token);
   const risk = assessRisk(token);
 
   if (signalScore < 70 || !risk.allowed) {
-    console.log(`SKIP ${token.name} | score=${signalScore} | risk=${risk.score} | reason=${risk.reason}`);
+    console.log(`SKIP ${token.name} | score=${signalScore} | risk=${risk.score}`);
+    return;
+  }
+
+  const walletInfo = await getWalletStatus(cfg.solanaPrivateKey, cfg.solanaRpcUrl, Number(process.env.MIN_SOL_BALANCE ?? '0.1'));
+  const health = evaluateHealth(walletInfo.solBalance, Number(process.env.MIN_SOL_BALANCE ?? '0.1'), signalScore, risk.score);
+
+  if (!health.ok) {
+    console.log(`Health gate failed for ${token.name}: ${health.warnings.join('; ')}`);
     return;
   }
 
   const decision = await askClaudeDecision(token);
   if (decision !== 'BUY') {
-    console.log(`Claude skipped ${token.name} (${token.mint}) | signal=${signalScore}`);
+    console.log(`Claude skipped ${token.name}`);
     return;
   }
 
   const alertText = `BUY signal: ${token.name} (${token.mint}) | score=${signalScore} | risk=${risk.score} | vol=$${formatMoney(token.volume)} | cap=$${formatMoney(token.marketCap)} | mode=${getModeLabel()}`;
   await sendTelegramAlert(alertText);
 
-  if (!cfg.autoExecute) {
+  if (cfg.mode === 'paper') {
+    await paperLedger.add({
+      id: crypto.randomUUID(),
+      symbol: token.name,
+      mint: token.mint,
+      solAmount: Number(Math.min(cfg.maxSolPerTrade, 0.05).toFixed(4)),
+      status: 'paper-buy',
+      createdAt: new Date().toISOString(),
+      notes: `Paper buy simulated; signal=${signalScore}; risk=${risk.score}`,
+    });
+    console.log(`PAPER BUY recorded for ${token.name} (${token.mint})`);
+    return;
+  }
+
+  if (cfg.dryRun || cfg.mode === 'dry-run') {
     console.log(`DRY_RUN approved: ${alertText}`);
+    await ledger.append({
+      id: crypto.randomUUID(),
+      symbol: token.name,
+      mint: token.mint,
+      action: 'BUY',
+      solAmount: Number(Math.min(cfg.maxSolPerTrade, 0.1).toFixed(4)),
+      status: 'simulated',
+      createdAt: new Date().toISOString(),
+      note: 'dry-run simulation',
+    });
     return;
   }
 
   try {
+    await ensureWalletHealth(cfg.solanaPrivateKey, cfg.solanaRpcUrl, Number(process.env.MIN_SOL_BALANCE ?? '0.1'));
     const size = Math.min(cfg.maxSolPerTrade, 0.25);
     const result = await trader.buy({
       mint: token.mint,
@@ -110,7 +133,17 @@ async function processToken(token: {
       slippage: 10,
     });
 
-    const successText = `Bought ${token.name} | size=${size} SOL | tx=${result.explorerUrl ?? 'submitted'}`;
+    const successText = `Executed BUY for ${token.name} | size=${size} SOL | tx=${result.explorerUrl ?? 'submitted'}`;
+    await ledger.append({
+      id: crypto.randomUUID(),
+      symbol: token.name,
+      mint: token.mint,
+      action: 'BUY',
+      solAmount: size,
+      status: 'open',
+      createdAt: new Date().toISOString(),
+      note: `Executed in ${cfg.mode} mode`,
+    });
     await sendTelegramAlert(successText);
     console.log(successText);
   } catch (error) {
@@ -120,8 +153,9 @@ async function processToken(token: {
   }
 }
 
-async function main() {
-  console.log(`Starting Solana trading agent | mode=${getModeLabel()} | dryRun=${cfg.dryRun} | autoExecute=${cfg.autoExecute}`);
+async function runCycle() {
+  const walletInfo = await getWalletStatus(cfg.solanaPrivateKey, cfg.solanaRpcUrl, Number(process.env.MIN_SOL_BALANCE ?? '0.1'));
+  console.log(`Wallet status: ${walletInfo.message}`);
 
   const tokens = await fetchTrendingTokens();
   console.log(`Fetched ${tokens.length} candidates`);
@@ -130,7 +164,7 @@ async function main() {
     try {
       const shouldTake = shouldBuy(token) && assessRisk(token).allowed;
       if (!shouldTake) {
-        console.log(`Pre-filter skipped ${token.name} | marketCap=${token.marketCap} | volume=${token.volume}`);
+        console.log(`Pre-filter skipped ${token.name}`);
         continue;
       }
 
@@ -140,8 +174,12 @@ async function main() {
     }
   }
 
-  console.log(`Cycle complete -> sleeping ${cfg.pollIntervalMs} ms`);
-  setTimeout(main, cfg.pollIntervalMs);
+  const exitPrice = 1.1;
+  const entryPrice = 1;
+  const exitDecision = decideExit(entryPrice, exitPrice, Number(process.env.TARGET_PROFIT_PCT ?? '12'), Number(process.env.STOP_LOSS_PCT ?? '8'));
+  console.log(`Exit check: ${exitDecision.reason}`);
+  console.log(`Next poll in ${cfg.pollIntervalMs} ms`);
+  setTimeout(runCycle, cfg.pollIntervalMs);
 }
 
-await main();
+await runCycle();

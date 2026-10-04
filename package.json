@@ -1,14 +1,17 @@
 {
   "name": "solana-trading-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "tsx src/index.ts",
-    "testnet": "tsx src/index.ts --mode testnet",
+    "dry-run": "tsx src/index.ts --mode dry-run",
+    "paper": "tsx src/index.ts --mode paper",
     "mainnet": "tsx src/index.ts --mode mainnet",
-    "dry-run": "tsx src/index.ts --dry-run",
+    "testnet": "tsx src/index.ts --mode testnet",
+    "wallet-check": "tsx src/wallet-check.ts",
+    "health-check": "tsx src/health-check.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {
