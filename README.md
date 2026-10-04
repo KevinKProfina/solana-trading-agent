@@ -1,95 +1,48 @@
 # Solana Trading Agent
 
-A scalable autonomous trading foundation for Solana token discovery, decisioning, and execution.
+This repository is currently in its foundational production phase.
 
-## What this version includes
+## Status overview
 
-- Solana wallet integration through `@agenti/sdk`
-- Trend market scanning for Pump.fun-like opportunities
-- Risk assessment before any buy
-- Claude-driven buy/skip decisions
-- Telegram alerts
-- Dry-run safety by default
-- Production-friendly config separation
-- Strategy scoring architecture ready for expansion
+Completed:
+- config parsing and validation
+- market scanning
+- risk gate
+- strategy scoring
+- Telegram alert layer
+- modular orchestration loop
+- portfolio / exposure primitives
+- position lifecycle foundation
+- backtest prototype for research
 
-## Philosophy
+Still missing before full production deployment:
+- live wallet-balance and token-balance checks
+- sell/close logic with trailing stop and target profit logic
+- path for paper trading and historical replay
+- persistence to disk for decisions, trades, and ledger state
+- kill switch and health-check loop
+- deployment package (Docker / Railway / Replit) and process supervision
+- CI + lint + tests
+- ratelimiting and retry infrastructure
+- deeper execution risk model for mainnet
 
-This is not a gambling script. It is a disciplined starting point for a production system that can later evolve toward:
+## Strategic priority
 
-- multi-strategy execution,
-- backtesting,
-- portfolio risk systems,
-- rebalancing,
-- on-chain position tracking,
-- agent-to-agent settlement,
-- and a full autonomous economic layer.
+The system is already well-positioned to move beyond a single trading bot and toward a larger autonomous economic engine. The next production steps are:
 
-## Quick start
+1. wallet safety + balance enforcement
+2. sell and exit logic
+3. portfolio-level risk and capital allocation
+4. backtest and paper-trade replay
+5. deployability and monitoring
+6. on-chain settlement and multi-agent expansion
 
-1. Copy `.env.example` to `.env` and fill values.
-2. Install dependencies:
+## Recommended next stage
 
-```bash
-npm install
-```
+The next milestone is not a speculative giant launch. It is a disciplined upgrade:
+- dry run
+- paper trading
+- risk-validated mainnet trials
+- then capital scaling
 
-3. Run in dry-run mode:
-
-```bash
-npm run dry-run
-```
-
-4. When ready for execution:
-
-```bash
-AUTO_EXECUTE=true
-DRY_RUN=false
-npm run mainnet
-```
-
-## System architecture
-
-The current design is intentionally modular so it can grow into a full trading system:
-
-- `src/config.ts` — environment-based configuration
-- `src/market.ts` — market discovery and token collection
-- `src/strategy.ts` — scoring and decision thresholds
-- `src/risk.ts` — risk gatekeeping
-- `src/alerts.ts` — Telegram notifications
-- `src/index.ts` — orchestration loop
-
-## Safety framework
-
-The system is built around a strict safety model:
-
-- no trade can happen without a risk gate,
-- no trade can happen without a strategy score threshold,
-- `DRY_RUN` is the default path,
-- `AUTO_EXECUTE` is explicitly opt-in,
-- max trade size is limited by environment configuration,
-- alerts provide operational transparency.
-
-## Next-stage roadmap
-
-This foundation is already designed for the next layers of the bigger vision:
-
-1. Paper trading / backtest mode
-2. Multi-strategy allocation system
-3. Portfolio-level risk tracking
-4. Lifecycle management of positions
-5. Agent marketplace and autonomous task payments
-6. Production-grade monitoring and reliability controls
-
-## Long-term plan
-
-The real win is not just another trading bot. The bigger goal is to build an autonomous economic layer where agents can:
-
-- discover opportunities,
-- evaluate risk,
-- execute trades,
-- pay for resources,
-- allocate capital across strategies,
-- and self-expand through earned capital and better execution.
-
-This repo is the first controlled foundation for that larger trajectory.
+From there, the larger goal remains intact: autonomous agents that discover, decide, execute, invest, and grow their capital in a self-reinforcing loop.
