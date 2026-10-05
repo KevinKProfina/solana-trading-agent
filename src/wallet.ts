@@ -1,64 +1,46 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { Connection, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 export type WalletStatus = {
   ok: boolean;
-  solBalance: number;
-  lamports: number;
-  publicKey: string;
+  publicKey?: string;
+  solBalance?: number;
   minRequiredSol: number;
   message: string;
 };
 
-export async function getWalletStatus(
-  solanaPrivateKey: string,
-  rpcUrl: string,
-  minRequiredSol: number,
-): Promise<WalletStatus> {
-  const keypair = Keypair.fromSecretKey(bs58.decode(solanaPrivateKey));
-  const connection = new Connection(rpcUrl);
-  const balanceLamports = await connection.getBalance(keypair.publicKey);
-  const solBalance = balanceLamports / LAMPORTS_PER_SOL;
+/** Decode a secret key given as base58 or as a JSON byte array (solana-keygen format). Never logs the key. */
+export function loadKeypair(secret: string): Keypair {
+  const trimmed = secret.trim();
+  try {
+    const bytes = trimmed.startsWith('[') ? Uint8Array.from(JSON.parse(trimmed) as number[]) : bs58.decode(trimmed);
+    return Keypair.fromSecretKey(bytes);
+  } catch {
+    throw new Error('SOLANA_PRIVATE_KEY could not be decoded (expected base58 or a JSON byte array)');
+  }
+}
 
-  const ok = solBalance >= minRequiredSol;
+export async function getWalletStatus(opts: {
+  privateKey?: string;
+  rpcUrl: string;
+  minRequiredSol: number;
+  connection?: Pick<Connection, 'getBalance'>;
+}): Promise<WalletStatus> {
+  if (!opts.privateKey) {
+    return { ok: false, minRequiredSol: opts.minRequiredSol, message: 'SOLANA_PRIVATE_KEY not set' };
+  }
+  const keypair = loadKeypair(opts.privateKey);
+  const connection = opts.connection ?? new Connection(opts.rpcUrl, 'confirmed');
+  const lamports = await connection.getBalance(keypair.publicKey);
+  const solBalance = lamports / LAMPORTS_PER_SOL;
+  const ok = solBalance >= opts.minRequiredSol;
   return {
     ok,
-    solBalance,
-    lamports: balanceLamports,
     publicKey: keypair.publicKey.toBase58(),
-    minRequiredSol,
+    solBalance,
+    minRequiredSol: opts.minRequiredSol,
     message: ok
-      ? `Wallet is funded (${solBalance.toFixed(4)} SOL available)`
-      : `Wallet is underfunded (${solBalance.toFixed(4)} SOL < ${minRequiredSol} SOL minimum)`,
+      ? `wallet funded (${solBalance.toFixed(4)} SOL)`
+      : `wallet underfunded (${solBalance.toFixed(4)} SOL < ${opts.minRequiredSol} SOL)`,
   };
-}
-
-export async function ensureWalletHealth(
-  solanaPrivateKey: string,
-  rpcUrl: string,
-  minRequiredSol: number,
-) {
-  const status = await getWalletStatus(solanaPrivateKey, rpcUrl, minRequiredSol);
-  if (!status.ok) {
-    throw new Error(status.message);
-  }
-
-  return status;
-}
-
-export async function saveJsonFile(filePath: string, data: unknown) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-}
-
-export async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
-  try {
-    const content = await fs.readFile(filePath, 'utf8');
-    return JSON.parse(content) as T;
-  } catch {
-    await saveJsonFile(filePath, fallback);
-    return fallback;
-  }
 }
