@@ -2,6 +2,7 @@ import path from 'node:path';
 import { readJsonSafe, stateDir, writeJsonAtomic, type RunMode } from './mm-contract.js';
 import { STRATEGY_NAME } from './config.js';
 import type { ExitReason } from './exit.js';
+import type { ExitRules } from './config.js';
 
 export type Position = {
   id: string;
@@ -32,6 +33,14 @@ export type Position = {
   returnPct?: number;
   exitReason?: ExitReason;
   exitTx?: string;
+  /** Strategy that opened the position: 'static' or an arena genome id (absent on positions from older versions). */
+  strategyId?: string;
+  /**
+   * Exit rules frozen at entry for positions opened by a promoted arena strategy, so a
+   * later strategy switch never changes them retroactively. Absent = the current static
+   * env exits apply (today's behaviour).
+   */
+  exitRules?: ExitRules;
 };
 
 export type EquityPoint = { ts: string; equityUsd: number };
@@ -42,6 +51,8 @@ export type TraderState = {
   equityCurve: EquityPoint[];
   /** Running max drawdown, survives equity curve truncation. */
   maxDrawdown: number;
+  /** Strategy id used in the last cycle (to detect and log switches). */
+  strategyId?: string;
   updatedAt?: string;
 };
 

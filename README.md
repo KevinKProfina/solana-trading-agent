@@ -33,11 +33,59 @@ Each cycle:
    equity curve kept in state) and a per-trade Sharpe ratio. It writes the `StrategyReport` and
    appends `position.opened` / `position.closed` events. A Telegram alert is optional.
 
+## Strategy source: static or arena-promoted (`STRATEGY_SOURCE`)
+
+- `STRATEGY_SOURCE=static` (default): entry gates, exits and sizing come from the env vars
+  below — exactly today's behaviour.
+- `STRATEGY_SOURCE=arena`: at the start of every cycle the trader reads
+  `$MM_STATE_DIR/arena/promotions.json`, written by `agent-arena`'s promotion pipeline
+  (a genome that survived the live paper arena **and** passed an out-of-sample backtest on
+  real GeckoTerminal history; never one from the synthetic market). It takes
+  `promoted.genome`, validates it (every gene must be a finite number; values are
+  clamped to the arena's gene bounds), maps it to trader settings and logs the genome id.
+  A missing, unreadable or invalid file, or no promoted strategy, falls back to the static
+  strategy with a note in the report.
+- **Promotion never enables live trading.** The file only provides strategy parameters;
+  the mode is still resolved from `MODE` + `LIVE_TRADING_CONFIRM` (+ key) exactly as
+  before and a test asserts that `STRATEGY_SOURCE=arena` cannot change it.
+- Every new position records `strategyId` (`static` or the genome id). Positions opened by
+  an arena strategy also store their exit rules; **a later strategy switch never changes
+  the exits of open positions**. Positions opened by the static strategy (and positions from
+  older versions) use the current env exits, as before. A switch emits a `strategy.switched`
+  event; the report notes always contain `strategy: <genomeId|static>`.
+
+Genome → settings mapping (`src/arena-strategy.ts`, pure and tested; every gene is used):
+
+| arena gene | trader setting | transform |
+|---|---|---|
+| `minLiquidityUsd` | `MIN_LIQUIDITY_USD` | max(gene, $10 000) floor |
+| `minVolume24hUsd` | `MIN_VOLUME_24H_USD` | as is |
+| `minAgeHours` / `maxAgeHours` | `MIN_AGE_HOURS` / `MAX_AGE_HOURS` | as is |
+| `minBuySellRatio` | `MIN_BUY_SELL_RATIO` | as is |
+| `minChangeM5`, `minChangeH1`, `maxChangeH1`, `minChangeH24` | `MIN_CHANGE_M5`, `MIN_CHANGE_H1`, `MAX_CHANGE_H1`, `MIN_CHANGE_H24` | as is (gate skipped when DexScreener omits the field) |
+| `rankBy` 0–3 | `RANK_BY` | h1-momentum, turnover, buy-pressure, youngest |
+| `positionPct` | `MAX_POSITION_PCT` | min(gene, env value) — env stays the cap |
+| `maxOpenPositions` | `MAX_CONCURRENT_POSITIONS` | min(gene, env value) |
+| `takeProfitPct` / `stopLossPct` | `MAX_AGE_HOURS`, `MIN_CHANGE_M5`, `MIN_CHANGE_H1`, `MAX_CHANGE_H1`, `MIN_CHANGE_H24` | unset (off) | optional max-age and momentum gates on DexScreener `priceChange` |
+| `RANK_BY` | `score` | candidate order: `score`, `h1-momentum`, `turnover`, `buy-pressure`, `youngest` |
+| `ENTRY_COOLDOWN_HOURS` | 0 | no new entries for this long after any close |
+| `STRATEGY_SOURCE` | `static` | `arena` = use agent-arena's promoted genome (see above); never changes the mode |
+| `TAKE_PROFIT_PCT` / `STOP_LOSS_PCT` | as is |
+| `trailingStopPct` | `TRAILING_STOP_PCT` (+ `TRAILING_ACTIVATION_PCT`=0) | as is; the arena trails as soon as the peak is above entry |
+| `maxHoldCycles` | `MAX_HOLD_HOURS` | cycles × arena cycle minutes / 60 |
+| `cooldownCycles` | `ENTRY_COOLDOWN_HOURS` | cycles × arena cycle minutes / 60 |
+
+Settings without a genome counterpart keep their env values and can only make a promoted
+strategy stricter: `MIN/MAX_MARKET_CAP_USD`, `MIN_TXNS_24H`, `MIN_LIQUIDITY_TO_MCAP`,
+`MIN_SCORE`, `MAX_USD_PER_TRADE`, `MIN_TRADE_USD`, the 24 h per-mint re-entry cooldown and
+the paper fill model. Small semantic differences remain (the arena's entry price excludes
+the entry fee; the arena counts cycles, the trader wall-clock hours).
+
 ## How it fits into the system
 
 | reads | writes |
 |---|---|
-| `$MM_STATE_DIR/allocations.json` (budget, paused), `$MM_STATE_DIR/KILL` / `MM_KILL=1` | `$MM_STATE_DIR/strategies/solana-trader.json` (`mm.strategy-report/v1`), `$MM_STATE_DIR/events.jsonl` |
+| `$MM_STATE_DIR/allocations.json` (budget, paused), `$MM_STATE_DIR/KILL` / `MM_KILL=1`, `$MM_STATE_DIR/arena/promotions.json` (only with `STRATEGY_SOURCE=arena`) | `$MM_STATE_DIR/strategies/solana-trader.json` (`mm.strategy-report/v1`), `$MM_STATE_DIR/events.jsonl` |
 
 Own state is kept in `$MM_STATE_DIR/solana-trader/positions.json` (paper) and
 `positions.live.json` (live). Paper and live positions are never mixed. Each file holds open and
@@ -138,5 +186,12 @@ Modes:
 - If a held token has no price on DexScreener, its exit check is skipped for that cycle. No price is invented.
 - The replay only exercises the exit rules on the bundled **synthetic** series. Entry selection
   cannot be backtested, because DexScreener offers no historical snapshots.
+- The arena-promoted strategy is selected on paper/backtest evidence only. Backtests on
+  memecoin history are noisy and suffer from survivorship bias (discovery lists pools that
+  survived until today); out-of-sample gains are not a guarantee of future results. Use
+  `STRATEGY_SOURCE=arena` in paper mode first.
+- The genome bounds in `src/arena-strategy.ts` are a copy of agent-arena's
+  `TRADER_GENOME`; if the arena changes its genes, this copy must be updated (an invalid or
+  incomplete genome falls back to the static strategy).
 - Known `npm audit` findings: moderate advisories in `@solana/web3.js@1` transitive dependencies
   (`jayson` → `stream-json`, `uuid`). The fix requires the breaking `@solana/web3.js@3` migration.

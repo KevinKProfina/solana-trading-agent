@@ -15,6 +15,8 @@ export type Token = {
   ageHours: number;
   buys24h: number;
   sells24h: number;
+  /** Percent price changes from DexScreener (5 = +5 %), when provided. */
+  priceChange?: { m5?: number; h1?: number; h24?: number };
 };
 
 export interface MarketSource {
@@ -39,6 +41,7 @@ type DexPair = {
   liquidity?: { usd?: number };
   volume?: { h24?: number };
   txns?: { h24?: { buys?: number; sells?: number } };
+  priceChange?: { m5?: number | string; h1?: number | string; h6?: number | string; h24?: number | string };
   marketCap?: number;
   fdv?: number;
   pairCreatedAt?: number;
@@ -49,11 +52,22 @@ function n(value: unknown): number {
   return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : 0;
 }
 
+function opt(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = typeof value === 'string' ? Number(value) : value;
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /** Convert a DexScreener pair into a Token; returns undefined for unusable pairs. */
 export function normalizePair(pair: DexPair, now = Date.now()): Token | undefined {
   const mint = pair.baseToken?.address;
   const priceUsd = n(pair.priceUsd);
   if (pair.chainId !== 'solana' || !mint || !pair.pairAddress || priceUsd <= 0) return undefined;
+  const priceChange: NonNullable<Token['priceChange']> = {};
+  for (const k of ['m5', 'h1', 'h24'] as const) {
+    const v = opt(pair.priceChange?.[k]);
+    if (v !== undefined) priceChange[k] = v;
+  }
   return {
     mint,
     symbol: pair.baseToken?.symbol ?? '?',
@@ -68,6 +82,7 @@ export function normalizePair(pair: DexPair, now = Date.now()): Token | undefine
     ageHours: pair.pairCreatedAt ? Math.max(0, (now - pair.pairCreatedAt) / 3_600_000) : Number.NaN,
     buys24h: n(pair.txns?.h24?.buys),
     sells24h: n(pair.txns?.h24?.sells),
+    priceChange,
   };
 }
 

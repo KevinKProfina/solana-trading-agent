@@ -13,7 +13,20 @@ export type StrategyRules = {
   minBuySellRatio: number;
   minLiquidityToMcap: number;
   minScore: number;
+  /** Max pair age (h). Infinity = no upper bound (default). */
+  maxAgeHours: number;
+  /** Momentum gates on DexScreener priceChange (%); undefined = gate off (default). A gate is skipped when the field is absent. */
+  minChangeM5?: number;
+  minChangeH1?: number;
+  maxChangeH1?: number;
+  minChangeH24?: number;
+  /** Candidate order: 'score' (default) or one of the arena rankings. */
+  rankBy: RankBy;
 };
+
+export const RANK_BY = ['score', 'h1-momentum', 'turnover', 'buy-pressure', 'youngest'] as const;
+export type RankBy = (typeof RANK_BY)[number];
+export type StrategySource = 'static' | 'arena';
 
 export type ExitRules = {
   takeProfitPct: number;
@@ -38,6 +51,10 @@ export type AppConfig = {
   modeNotes: string[];
   pollIntervalMs: number;
   maxCandidates: number;
+  /** Where entry/exit/sizing parameters come from: env (static, default) or the arena's promoted genome. Never affects the mode. */
+  strategySource: StrategySource;
+  /** No new entries for this many hours after the most recent close (0 = off, default). */
+  entryCooldownHours: number;
   strategy: StrategyRules;
   exits: ExitRules;
   sizing: SizingRules;
@@ -62,6 +79,12 @@ function num(env: Env, key: string, fallback: number): number {
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new Error(`${key} must be a number (got "${raw}")`);
   return value;
+}
+
+function optNum(env: Env, key: string): number | undefined {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  return num(env, key, 0);
 }
 
 function flag(env: Env, key: string, fallback: boolean): boolean {
@@ -96,11 +119,17 @@ export function resolveMode(env: Env, argv: string[]): { mode: RunMode; notes: s
 
 export function readConfig(env: Env = process.env, argv: string[] = process.argv): AppConfig {
   const { mode, notes } = resolveMode(env, argv);
+  const source = (env.STRATEGY_SOURCE ?? '').trim().toLowerCase() || 'static';
+  if (source !== 'static' && source !== 'arena') notes.push(`Unknown STRATEGY_SOURCE "${env.STRATEGY_SOURCE}"; using static`);
+  const rankBy = (env.RANK_BY ?? '').trim().toLowerCase() || 'score';
+  if (!(RANK_BY as readonly string[]).includes(rankBy)) throw new Error(`RANK_BY must be one of ${RANK_BY.join(', ')} (got "${env.RANK_BY}")`);
   const cfg: AppConfig = {
     mode,
     modeNotes: notes,
     pollIntervalMs: num(env, 'POLL_INTERVAL_MS', 300_000),
     maxCandidates: num(env, 'MAX_CANDIDATES', 30),
+    strategySource: source === 'arena' ? 'arena' : 'static',
+    entryCooldownHours: num(env, 'ENTRY_COOLDOWN_HOURS', 0),
     strategy: {
       minLiquidityUsd: num(env, 'MIN_LIQUIDITY_USD', 50_000),
       minVolume24hUsd: num(env, 'MIN_VOLUME_24H_USD', 100_000),
@@ -111,6 +140,12 @@ export function readConfig(env: Env = process.env, argv: string[] = process.argv
       minBuySellRatio: num(env, 'MIN_BUY_SELL_RATIO', 0.9),
       minLiquidityToMcap: num(env, 'MIN_LIQUIDITY_TO_MCAP', 0.03),
       minScore: num(env, 'MIN_SCORE', 50),
+      maxAgeHours: num(env, 'MAX_AGE_HOURS', Number.POSITIVE_INFINITY),
+      minChangeM5: optNum(env, 'MIN_CHANGE_M5'),
+      minChangeH1: optNum(env, 'MIN_CHANGE_H1'),
+      maxChangeH1: optNum(env, 'MAX_CHANGE_H1'),
+      minChangeH24: optNum(env, 'MIN_CHANGE_H24'),
+      rankBy: rankBy as RankBy,
     },
     exits: {
       takeProfitPct: num(env, 'TAKE_PROFIT_PCT', 25),

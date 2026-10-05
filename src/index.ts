@@ -49,6 +49,7 @@ async function main(): Promise<void> {
   const cfg = readConfig();
   console.log(`[init] ${STRATEGY_NAME} starting in ${cfg.mode.toUpperCase()} mode`);
   for (const note of cfg.modeNotes) console.warn(`[init] ${note}`);
+  console.log(`[init] strategy source: ${cfg.strategySource}${cfg.strategySource === 'arena' ? ' (agent-arena promoted genome, re-read every cycle; falls back to static; never changes the mode)' : ''}`);
   const deps = buildDeps(cfg);
 
   if (process.argv.includes('--once')) {

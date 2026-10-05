@@ -27,6 +27,7 @@ import {
 } from './positions.js';
 import { computeTradeSize } from './sizing.js';
 import { rankCandidates } from './strategy.js';
+import { resolveStrategy, type ActiveStrategy } from './arena-strategy.js';
 
 export type CycleDeps = {
   cfg: AppConfig;
@@ -74,6 +75,19 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
 
   const state = dryRun ? emptyState() : await loadState(cfg.mode);
 
+  // Strategy parameters for NEW entries (static env, or the arena's promoted genome).
+  // This never touches cfg.mode: promotion cannot enable live trading.
+  const active = await resolveStrategy(cfg);
+  notes.push(...active.notes);
+  console.log(`[cycle] strategy: ${active.id}${active.source === 'arena' ? ' (arena-promoted genome)' : ''}`);
+  const previousStrategy = state.strategyId ?? 'static';
+  if (!dryRun && previousStrategy !== active.id) {
+    const msg = `strategy switched ${previousStrategy} → ${active.id}; open positions keep the exit rules they were opened with`;
+    console.log(`[cycle] ${msg}`);
+    await emitEvent({ source: STRATEGY_NAME, level: 'info', type: 'strategy.switched', message: msg, data: { mode: cfg.mode, from: previousStrategy, to: active.id } });
+  }
+  state.strategyId = active.id;
+
   // 1) manage open positions: mark prices, apply exits (exits are allowed even when killed/paused)
   const open = openPositions(state);
   if (open.length > 0) {
@@ -100,7 +114,8 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
             openedAt: position.openedAt,
             now: at,
           },
-          cfg.exits,
+          // rules frozen at entry by an arena strategy; otherwise today's static env exits
+          position.exitRules ?? cfg.exits,
         );
         if (decision.shouldExit) {
           reason = decision.reason;
@@ -130,6 +145,11 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   if (killed) entryBlock = 'kill switch active: no new positions';
   else if (paused) entryBlock = 'strategy paused by orchestrator: no new positions';
   else if (!(budgetUsd > 0)) entryBlock = 'no budget allocated: no new positions';
+  else if (active.entryCooldownHours > 0) {
+    const lastClose = Math.max(0, ...closedPositions(state).map((p) => new Date(p.closedAt ?? 0).getTime()));
+    const until = lastClose + active.entryCooldownHours * 3_600_000;
+    if (lastClose > 0 && now().getTime() < until) entryBlock = `entry cooldown (${active.entryCooldownHours}h after the last close) until ${new Date(until).toISOString()}`;
+  }
   else if (deps.preTradeCheck) {
     const check = await deps.preTradeCheck().catch((e: Error) => ({ ok: false, message: e.message }));
     if (!check.ok) entryBlock = `pre-trade check failed: ${check.message}`;
@@ -140,7 +160,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   } else {
     const candidates = await market.discover(cfg.maxCandidates);
     if (candidates.length === 0) notes.push('no candidates from market source (API unavailable or nothing listed)');
-    const ranked = rankCandidates(candidates, cfg.strategy);
+    const ranked = rankCandidates(candidates, active.strategy);
     const allowed = ranked.filter((c) => c.evaluation.allowed);
     console.log(`[cycle] ${candidates.length} candidates, ${allowed.length} passed deterministic gates`);
     const cutoff = now().getTime() - cooldownMs;
@@ -154,7 +174,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
 
       const size = computeTradeSize(
         { budgetUsd, deployedUsd: deployedUsd(state) + dryDeployed, openPositions: openPositions(state).length + dryOpen },
-        cfg.sizing,
+        active.sizing,
       );
       if (size.sizeUsd <= 0) {
         notes.push(`entries stopped: ${size.reason}`);
@@ -177,7 +197,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
       }
 
       try {
-        const position = await openFrom(token, size.sizeUsd, deps.executor!, cfg.mode, now());
+        const position = await openFrom(token, size.sizeUsd, deps.executor!, cfg.mode, now(), active);
         state.positions.push(position);
         opened.push(position);
         const msg = `${position.simulated ? '[SIMULATED] ' : ''}OPEN ${token.symbol} ${usd(position.sizeUsd)} @ $${position.entryPriceUsd.toPrecision(6)} (score ${evaluation.score})`;
@@ -222,6 +242,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
     lastUpdated: now().toISOString(),
     notes: [
       ...notes,
+      `strategy: ${active.id}`,
       `opened ${opened.length}, closed ${closed.length} this cycle`,
       'unrealized PnL is marked at DexScreener price before exit fees/slippage',
     ],
@@ -230,7 +251,7 @@ export async function runCycle(deps: CycleDeps): Promise<CycleResult> {
   return { report, opened, closed, state };
 }
 
-async function openFrom(token: Token, sizeUsd: number, executor: Executor, mode: AppConfig['mode'], at: Date): Promise<Position> {
+async function openFrom(token: Token, sizeUsd: number, executor: Executor, mode: AppConfig['mode'], at: Date, active: ActiveStrategy): Promise<Position> {
   const fill = await executor.buy(token, sizeUsd);
   if (!(fill.quantity > 0) || !(fill.priceUsd > 0)) throw new Error('executor returned an empty fill');
   return {
@@ -250,6 +271,8 @@ async function openFrom(token: Token, sizeUsd: number, executor: Executor, mode:
     lastPriceUsd: token.priceUsd,
     lastPriceAt: at.toISOString(),
     entryTx: fill.tx,
+    strategyId: active.id,
+    ...(active.source === 'arena' ? { exitRules: { ...active.exits } } : {}),
   };
 }
 
